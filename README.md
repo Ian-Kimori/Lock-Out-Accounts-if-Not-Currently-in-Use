@@ -17,7 +17,7 @@ SHOW VARIABLES LIKE 'performance_schema';
 | Condition | What it means for the rest of the assessment |
 |---|---|
 | `performance_schema = ON` | Can use connection counts in Step 5 |
-| `performance_schema = OFF` | Skip Step 3 — rely on Steps 4, 6, 7 only |
+| `performance_schema = OFF` | Skip Step 5 — rely on Steps 4, 6, 7 only |
 
 ---
 
