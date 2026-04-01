@@ -46,7 +46,7 @@ Note any accounts where:
 
 ---
 
-**STEP 4 — Get full account assessment with human-readable dates**
+**STEP 4a — Get full account assessment with human-readable dates**
 ```sql
 SELECT g.user, g.host,
        JSON_EXTRACT(g.priv, '$.account_locked') AS account_locked,
@@ -61,7 +61,7 @@ Assess every row returned:
 
 | Condition | Status |
 |---|---|
-| `PUBLIC` role with all NULLs | ⚠️ Role not a user — check privileges in Step 4a |
+| `PUBLIC` role with all NULLs | ⚠️ Role not a user — check privileges in Step 4b |
 | Reserved account + `account_locked = true` | ✅ PASS |
 | Reserved account + `account_locked = false` | ❌ FAIL |
 | Any account + `password_last_changed` NULL + unlocked | ❌ FAIL |
@@ -71,7 +71,7 @@ Assess every row returned:
 
 ---
 
-Check PUBLIC role privileges**
+**STEP 4b — Check PUBLIC role privileges**
 ```sql
 SHOW GRANTS FOR PUBLIC;
 ```
