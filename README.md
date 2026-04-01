@@ -71,7 +71,7 @@ Assess every row returned:
 
 ---
 
-**STEP 4a — Check PUBLIC role privileges**
+Check PUBLIC role privileges**
 ```sql
 SHOW GRANTS FOR PUBLIC;
 ```
