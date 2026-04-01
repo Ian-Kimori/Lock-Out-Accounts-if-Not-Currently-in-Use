@@ -27,7 +27,7 @@ SELECT CONCAT(user, '@', host, ' => ', JSON_DETAILED(priv))
 FROM mysql.global_priv;
 ```
 
-This returns the full privilege JSON for every account. It is verbose — use Step 2 for a cleaner view.
+This returns the full privilege JSON for every account. It is verbose — use Step 3 for a cleaner view.
 
 ---
 
@@ -60,7 +60,7 @@ Assess each row:
 | Reserved account + `account_locked = false` | ❌ FAIL |
 | Any account + `password_last_changed` is NULL + unlocked | ❌ FAIL |
 | Any account + `password_last_changed` over 1 year ago + unlocked | ❌ FAIL |
-| Any account + `account_locked = false` + recent `password_last_changed` | ⚠️ Verify in Step 4 |
+| Any account + `account_locked = false` + recent `password_last_changed` | ⚠️ Verify in Step 6 |
 | Any account + `account_locked = true` | ✅ PASS |
 
 ---
@@ -83,7 +83,7 @@ ORDER BY g.user, g.host;
 | `total_connections = 0` + `account_locked = true` | ✅ PASS — inactive and locked |
 | `total_connections = 0` + `account_locked = false` | ❌ FAIL — inactive but unlocked |
 | `total_connections > 0` + `account_locked = true` | ❌ FAIL — active but locked |
-| All counts = 0 + server recently restarted | ⚠️ Unreliable — rely on Steps 2, 4, 5 |
+| All counts = 0 + server recently restarted | ⚠️ Unreliable — rely on Steps 4, 6, 7 |
 
 **If performance_schema = OFF skip this step entirely and proceed to Step 4.**
 
@@ -136,7 +136,7 @@ For each username seen in the logs:
 
 **STEP 8 — Manual verification for remaining unlocked accounts**
 
-For every account that is unlocked and cannot be confirmed active from Steps 3 or 5, ask the DBA or infrastructure team:
+For every account that is unlocked and cannot be confirmed active from Steps 5 or 7, ask the DBA or infrastructure team:
 
 ```
 ☐ What application or person uses this account?
