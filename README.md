@@ -13,9 +13,6 @@ FROM mysql.global_priv;
 This returns the full privilege JSON for every account. It is verbose — use Step 2 for a cleaner view.
 
 ---
-Here is the complete clean end-to-end procedure:
-
----
 
 **STEP 2 — Get all accounts with lock status**
 ```sql
