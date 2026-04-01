@@ -8,7 +8,8 @@
 SELECT NOW() - INTERVAL variable_value SECOND AS started_at
 FROM information_schema.global_status
 WHERE variable_name = 'Uptime';
-
+```
+```sql
 -- Check if performance_schema is on or off
 SHOW VARIABLES LIKE 'performance_schema';
 ```
