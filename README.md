@@ -4,34 +4,32 @@
 
 **STEP 1 — Check server uptime and performance_schema status**
 ```sql
--- Check when server last restarted
 SELECT NOW() - INTERVAL variable_value SECOND AS started_at
 FROM information_schema.global_status
 WHERE variable_name = 'Uptime';
 ```
 ```sql
--- Check if performance_schema is on or off
 SHOW VARIABLES LIKE 'performance_schema';
 ```
 
-| Condition | What it means for the rest of the assessment |
+| Condition | What it means |
 |---|---|
 | `performance_schema = ON` | Can use connection counts in Step 5 |
 | `performance_schema = OFF` | Skip Step 5 — rely on Steps 4, 6, 7 only |
+| Server restarted recently + `performance_schema = ON` | Connection counts unreliable — rely on Steps 4, 6, 7 |
 
 ---
 
-**STEP 2 — Run the benchmark query**
+**STEP 2 — Run the full benchmark query**
 ```sql
-SELECT CONCAT(user, '@', host, ' => ', JSON_DETAILED(priv)) 
+SELECT CONCAT(user, '@', host, ' => ', JSON_DETAILED(priv))
 FROM mysql.global_priv;
 ```
-
-This returns the full privilege JSON for every account. It is verbose — use Step 3 for a cleaner view.
+This is verbose but is the exact benchmark query. Use Step 3 and 4 for cleaner assessment.
 
 ---
 
-**STEP 3 — Get all accounts with lock status**
+**STEP 3 — Get raw lock status for all accounts**
 ```sql
 SELECT user, host,
        JSON_EXTRACT(priv, '$.account_locked') AS account_locked,
@@ -41,7 +39,14 @@ FROM mysql.global_priv
 ORDER BY user, host;
 ```
 
-**STEP 4 — Get all accounts with lock status and last password change**
+Note any accounts where:
+- `account_locked` is `NULL` — these are roles like `PUBLIC`, not login accounts
+- `account_locked` is `false` — these need further investigation
+- `account_locked` is `true` — these are correctly disabled
+
+---
+
+**STEP 4 — Get full account assessment with human-readable dates**
 ```sql
 SELECT g.user, g.host,
        JSON_EXTRACT(g.priv, '$.account_locked') AS account_locked,
@@ -52,16 +57,30 @@ FROM mysql.global_priv g
 ORDER BY g.user, g.host;
 ```
 
-Assess each row:
+Assess every row returned:
 
 | Condition | Status |
 |---|---|
+| `PUBLIC` role with all NULLs | ⚠️ Role not a user — check privileges in Step 4a |
 | Reserved account + `account_locked = true` | ✅ PASS |
 | Reserved account + `account_locked = false` | ❌ FAIL |
-| Any account + `password_last_changed` is NULL + unlocked | ❌ FAIL |
+| Any account + `password_last_changed` NULL + unlocked | ❌ FAIL |
 | Any account + `password_last_changed` over 1 year ago + unlocked | ❌ FAIL |
-| Any account + `account_locked = false` + recent `password_last_changed` | ⚠️ Verify in Step 6 |
+| Any account + `account_locked = false` + recent password change | ⚠️ Verify in Steps 7 and 8 |
 | Any account + `account_locked = true` | ✅ PASS |
+
+---
+
+**STEP 4a — Check PUBLIC role privileges**
+```sql
+SHOW GRANTS FOR PUBLIC;
+```
+
+| Condition | Status |
+|---|---|
+| Returns `USAGE` only or no rows | ✅ PASS — no privileges assigned to all users |
+| Returns any `SELECT`, `INSERT`, `UPDATE` or other data privilege | ❌ FAIL |
+| Returns `SUPER` or any admin privilege | ❌ CRITICAL FAIL |
 
 ---
 
@@ -82,10 +101,10 @@ ORDER BY g.user, g.host;
 | `total_connections > 0` + `account_locked = false` | ✅ PASS — active and unlocked |
 | `total_connections = 0` + `account_locked = true` | ✅ PASS — inactive and locked |
 | `total_connections = 0` + `account_locked = false` | ❌ FAIL — inactive but unlocked |
-| `total_connections > 0` + `account_locked = true` | ❌ FAIL — active but locked |
-| All counts = 0 + server recently restarted | ⚠️ Unreliable — rely on Steps 4, 6, 7 |
+| `total_connections > 0` + `account_locked = true` | ❌ FAIL — active but locked, will cause errors |
+| All counts = 0 + server recently restarted | ⚠️ Unreliable — skip and rely on Steps 7 and 8 |
 
-**If performance_schema = OFF skip this step entirely and proceed to Step 4.**
+**If performance_schema = OFF skip this step entirely.**
 
 ---
 
@@ -107,56 +126,53 @@ WHERE user IN (
 |---|---|
 | All reserved accounts show `account_locked = true` | ✅ PASS |
 | Any reserved account shows `account_locked = false` | ❌ FAIL |
-| Reserved account missing from list entirely | ⚠️ Check if it exists |
+| `PUBLIC` shows NULL for `account_locked` | ✅ Expected — it is a role, assess via Step 4a |
+| Reserved account missing from output entirely | ⚠️ Verify it exists with `SELECT user FROM mysql.global_priv` |
 
 ---
 
 **STEP 7 — Check error log for recent account activity**
+```sql
+-- Find the log file location first
+SHOW VARIABLES LIKE 'log_error';
+```
+
+Then on the OS:
 ```bash
-# Find log location first
-mysql -u root -e "SHOW VARIABLES LIKE 'log_error';"
-
-# Then grep for connection activity
-grep -iE "connect|login|access denied" /var/log/mariadb/mariadb.log 2>/dev/null | \
-  tail -100
-
-# Alternative locations
+# Use the path returned above, or try these common locations
+grep -iE "connect|login|access denied" /var/log/mariadb/mariadb.log 2>/dev/null | tail -100
 grep -iE "connect|login" /var/log/mysql/error.log 2>/dev/null | tail -100
 grep -iE "connect|login" /var/log/mariadb/*.log 2>/dev/null | tail -100
 ```
 
-For each username seen in the logs:
-
 | Condition | Status |
 |---|---|
-| Username appears in recent logs + account unlocked | ✅ Likely active — verify with DBA |
-| Username never appears in logs + account unlocked | ❌ FAIL — lock until verified |
+| Username appears in recent logs + account unlocked | ✅ Likely active — confirm in Step 8 |
+| Username never appears in any log + account unlocked | ❌ FAIL — lock until verified |
 
 ---
 
 **STEP 8 — Manual verification for remaining unlocked accounts**
 
-For every account that is unlocked and cannot be confirmed active from Steps 5 or 7, ask the DBA or infrastructure team:
+For every account that is unlocked and not confirmed active from Steps 5 or 7, ask the DBA or infrastructure team:
 
 ```
 ☐ What application or person uses this account?
 ☐ When was it last used?
 ☐ Is it still needed?
-☐ If unsure — lock it now and unlock when confirmed needed
+☐ If unsure — lock it now, unlock only when confirmed needed
 ```
 
 | Answer | Status |
 |---|---|
 | Confirmed active + named owner identified | ✅ PASS |
-| Cannot confirm active + no named owner | ❌ FAIL |
+| Cannot confirm active + no named owner | ❌ FAIL — lock immediately |
 | Confirmed no longer needed | ❌ FAIL — drop or lock immediately |
 
 ---
 
-**STEP 9 — Identify and list all failures**
+**STEP 9 — List all high priority failures in one query**
 ```sql
--- Accounts that are unlocked with no recent password change
--- These are your highest priority failures
 SELECT g.user, g.host,
        JSON_EXTRACT(g.priv, '$.account_locked') AS account_locked,
        FROM_UNIXTIME(JSON_EXTRACT(g.priv, '$.password_last_changed'))
@@ -165,21 +181,21 @@ FROM mysql.global_priv g
 WHERE JSON_EXTRACT(g.priv, '$.account_locked') = false
 AND (
   JSON_EXTRACT(g.priv, '$.password_last_changed') IS NULL
-  OR FROM_UNIXTIME(JSON_EXTRACT(g.priv, '$.password_last_changed')) 
+  OR FROM_UNIXTIME(JSON_EXTRACT(g.priv, '$.password_last_changed'))
      < NOW() - INTERVAL 365 DAY
 )
-AND g.user NOT IN ('mysql.sys','mysql.session','mysql.infoschema','mariadb.sys')
+AND g.user NOT IN ('mysql.sys','mysql.session','mysql.infoschema','mariadb.sys','PUBLIC')
 ORDER BY g.user, g.host;
 ```
 
 | Condition | Status |
 |---|---|
 | No rows returned | ✅ No stale unlocked accounts |
-| Any rows returned | ❌ FAIL — each row needs locking or verification |
+| Any rows returned | ❌ FAIL — each row must be locked or verified |
 
 ---
 
-**STEP 10 — Remediate all failures found**
+**STEP 10 — Remediate all failures**
 ```sql
 -- Lock inactive or unverified accounts
 ALTER USER 'username'@'host' ACCOUNT LOCK;
@@ -192,7 +208,7 @@ ALTER USER 'mysql.infoschema'@'localhost' ACCOUNT LOCK;
 -- Drop accounts confirmed as no longer needed
 DROP USER 'username'@'host';
 
--- Verify all locks applied
+-- Verify all locks applied correctly
 SELECT user, host,
        JSON_EXTRACT(priv, '$.account_locked') AS account_locked
 FROM mysql.global_priv
@@ -201,18 +217,20 @@ ORDER BY user, host;
 
 ---
 
-**Overall pass/fail decision:**
+**Overall pass/fail decision tree — work top to bottom:**
 
 ```
-performance_schema OFF?                          → Note as separate finding
-Any reserved account not locked?                 YES → FAIL
+performance_schema = OFF?                         → Note as a separate finding
+PUBLIC role has privileges beyond USAGE?          YES → FAIL
+Any reserved account not locked?                  YES → FAIL
 Any account with NULL password_last_changed
-and unlocked?                                    YES → FAIL
+  and unlocked?                                   YES → FAIL
 Any account with password unchanged > 1 year
-and unlocked?                                    YES → FAIL
-Any unlocked account not verifiable as
-active by DBA/log evidence?                      YES → FAIL
-All reserved accounts locked?                    YES → continue
-All active accounts confirmed by DBA/logs?       YES → continue
-All inactive/unknown accounts locked?            YES → PASS
+  and unlocked?                                   YES → FAIL
+Any unlocked account not verifiable as active
+  by DBA or log evidence?                         YES → FAIL
+All reserved accounts locked?                     YES → continue
+PUBLIC role has USAGE only?                       YES → continue
+All active accounts confirmed by DBA or logs?     YES → continue
+All inactive or unknown accounts locked?          YES → PASS
 ```
