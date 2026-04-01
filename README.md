@@ -13,10 +13,12 @@ FROM mysql.global_priv;
 This returns the full privilege JSON for every account. It is verbose — use Step 2 for a cleaner view.
 
 ---
+Here is the complete clean end-to-end procedure:
 
-**STEP 2 — Run a focused query easier to assess**
+---
+
+**STEP 2 — Get all accounts with lock status**
 ```sql
--- Clean view of lock status for all accounts
 SELECT user, host,
        JSON_EXTRACT(priv, '$.account_locked') AS account_locked,
        JSON_EXTRACT(priv, '$.password_expired') AS password_expired,
@@ -27,106 +29,149 @@ ORDER BY user, host;
 
 ---
 
-**STEP 3 — Check last login activity per account**
+**STEP 3 — Get connection activity for all accounts**
 ```sql
--- Check when each user last connected (requires performance_schema)
-SELECT user, host, 
-       MAX(event_time) AS last_login
-FROM performance_schema.events_statements_history_long
-GROUP BY user, host
-ORDER BY last_login DESC;
-```
-
-Or alternatively:
-```sql
-SELECT user, host, last_login 
-FROM information_schema.user_statistics 2>/dev/null;
+SELECT user, host,
+       current_connections,
+       total_connections
+FROM performance_schema.accounts
+WHERE user IS NOT NULL
+ORDER BY total_connections DESC;
 ```
 
 ---
 
-**How to assess each account:**
+**STEP 4 — Combine lock status and activity in one view**
+```sql
+SELECT g.user, g.host,
+       JSON_EXTRACT(g.priv, '$.account_locked') AS account_locked,
+       JSON_EXTRACT(g.priv, '$.password_expired') AS password_expired,
+       COALESCE(a.total_connections, 0) AS total_connections,
+       COALESCE(a.current_connections, 0) AS current_connections
+FROM mysql.global_priv g
+LEFT JOIN performance_schema.accounts a
+       ON g.user = a.user AND g.host = a.host
+ORDER BY g.user, g.host;
+```
 
-**MariaDB reserved accounts** — must be locked:
+---
 
-| Account | Expected status | Condition | Status |
+**STEP 5 — Specifically check reserved accounts are locked**
+```sql
+SELECT user, host,
+       JSON_EXTRACT(priv, '$.account_locked') AS account_locked
+FROM mysql.global_priv
+WHERE user IN ('mysql.sys','mysql.session','mysql.infoschema',
+               'mariadb.sys','PUBLIC');
+```
+
+---
+
+**STEP 6 — Identify accounts that should be locked but are not**
+```sql
+SELECT g.user, g.host,
+       JSON_EXTRACT(g.priv, '$.account_locked') AS account_locked,
+       COALESCE(a.total_connections, 0) AS total_connections
+FROM mysql.global_priv g
+LEFT JOIN performance_schema.accounts a
+       ON g.user = a.user AND g.host = a.host
+WHERE JSON_EXTRACT(g.priv, '$.account_locked') = false
+AND COALESCE(a.total_connections, 0) = 0
+AND g.user NOT IN ('root')
+ORDER BY g.user;
+```
+
+---
+
+**How to assess the output of each step:**
+
+**STEP 1 — Lock status assessment:**
+
+| Condition | Status |
+|---|---|
+| Reserved account has `account_locked = true` | ✅ PASS |
+| Reserved account has `account_locked = false` | ❌ FAIL |
+| Active user account has `account_locked = false` | ✅ PASS — if justified |
+| Unused account has `account_locked = false` | ❌ FAIL |
+
+---
+
+**STEP 2 — Connection activity assessment:**
+
+| Condition | Status |
+|---|---|
+| `total_connections > 0` and account unlocked | ✅ PASS — account in use |
+| `total_connections = 0` and account unlocked | ❌ FAIL — never used, should be locked |
+| `total_connections = 0` and account locked | ✅ PASS — correctly disabled |
+| `current_connections > 0` and account unlocked | ✅ PASS — actively in use right now |
+
+---
+
+**STEP 3 — Combined assessment per account:**
+
+| account_locked | total_connections | Assessment | Status |
 |---|---|---|---|
-| `mysql.sys@localhost` | Must be locked | `account_locked = true` | ✅ PASS |
-| `mysql.session@localhost` | Must be locked | `account_locked = true` | ✅ PASS |
-| `mysql.infoschema@localhost` | Must be locked | `account_locked = true` | ✅ PASS |
-| Any reserved account with `account_locked = false` | | | ❌ FAIL |
+| `false` | Greater than 0 | Active and unlocked | ✅ PASS |
+| `true` | 0 | Inactive and locked | ✅ PASS |
+| `false` | 0 | Inactive but unlocked | ❌ FAIL |
+| `true` | Greater than 0 | Active but locked | ❌ FAIL — will cause app errors |
 
 ---
 
-**Active accounts — must be unlocked but justified:**
+**STEP 4 — Reserved accounts assessment:**
+
+| Account | Expected | Condition | Status |
+|---|---|---|---|
+| `mysql.sys` | Locked | `account_locked = true` | ✅/❌ |
+| `mysql.session` | Locked | `account_locked = true` | ✅/❌ |
+| `mysql.infoschema` | Locked | `account_locked = true` | ✅/❌ |
+| `mariadb.sys` | Locked | `account_locked = true` | ✅/❌ |
+| `PUBLIC` | Locked | `account_locked = true` | ✅/❌ |
+| Any of the above with `false` | | | ❌ FAIL |
+
+---
+
+**STEP 5 — Unlocked inactive accounts:**
 
 | Condition | Status |
 |---|---|
-| Account is unlocked AND actively used AND maps to current person/app | ✅ PASS |
-| Account is unlocked AND has recent login activity | ✅ PASS |
-| Account is unlocked AND has no login activity in 30+ days | ❌ FAIL — should be locked |
-| Account is unlocked AND owner has left organisation | ❌ FAIL — should be dropped |
-| Account is unlocked AND cannot be attributed to any person/app | ❌ FAIL — lock immediately |
-
----
-
-**Inactive accounts — must be locked:**
-
-| Condition | Status |
-|---|---|
-| Account is locked AND not currently needed | ✅ PASS |
-| Account is locked AND `password_expired = true` | ✅ PASS |
-| Account exists with no activity and is NOT locked | ❌ FAIL |
-
----
-
-**STEP 4 — Cross-check with your earlier user list**
-
-Take the 12 users you found earlier (10 weak SHA1 + 2 ed25519) and for each one ask:
-
-```
-☐ Is this account currently in active use?
-☐ Is there a known person or application using it right now?
-☐ Has it been used in the last 30 days?
-☐ If not in use — is it locked?
-```
-
-| Answer | Status |
-|---|---|
-| In use + unlocked + identifiable owner | ✅ PASS |
-| Not in use + locked | ✅ PASS |
-| Not in use + unlocked | ❌ FAIL |
-| In use + cannot identify owner | ❌ FAIL |
+| No rows returned | ✅ PASS — no unlocked inactive accounts |
+| Any rows returned | ❌ FAIL — each row is an account that needs locking |
 
 ---
 
 **Overall pass/fail logic:**
 
 ```
-Any reserved account not locked?              YES → FAIL
-Any inactive account not locked?              YES → FAIL
-Any account with no login in 30+ days unlocked? YES → FAIL
+Any reserved account not locked?                YES → FAIL
+Any account unlocked with zero connections?      YES → FAIL
+Any account locked but actively connecting?      YES → FAIL — investigate
 Any account with no identifiable owner unlocked? YES → FAIL
-All active accounts have justified unlock?    YES → PASS
-All inactive accounts locked?                 YES → PASS
+All reserved accounts locked?                    YES → continue
+All active accounts unlocked and justified?      YES → continue
+All inactive accounts locked?                    YES → PASS
 ```
 
 ---
 
-**Remediation:**
+**Remediation for any failures found:**
 ```sql
 -- Lock an inactive account
 ALTER USER 'username'@'host' ACCOUNT LOCK;
 
--- Verify it is locked
-SELECT user, host, 
-       JSON_EXTRACT(priv, '$.account_locked') AS locked
+-- Lock a reserved account
+ALTER USER 'mysql.sys'@'localhost' ACCOUNT LOCK;
+
+-- Verify lock applied
+SELECT user, host,
+       JSON_EXTRACT(priv, '$.account_locked') AS account_locked
 FROM mysql.global_priv
 WHERE user = 'username';
-
--- Unlock when account becomes active again
-ALTER USER 'username'@'host' ACCOUNT UNLOCK;
 
 -- Drop accounts with no current owner
 DROP USER 'username'@'host';
 ```
+
+---
+
+**Run the steps in order — Step 3 and Step 5 will give you the clearest picture of where the failures are.**
